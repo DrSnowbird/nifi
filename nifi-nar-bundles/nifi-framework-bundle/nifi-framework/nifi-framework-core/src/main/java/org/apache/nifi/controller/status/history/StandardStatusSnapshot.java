@@ -30,6 +30,7 @@ public class StandardStatusSnapshot implements StatusSnapshot {
 
     private Map<MetricDescriptor<?>, Long> counterValues = null;
     private Date timestamp = new Date();
+    private Set<MetricDescriptor<?>> metricDescriptorsWithCounters = null;
 
 
     public StandardStatusSnapshot(final Set<MetricDescriptor<?>> metricDescriptors) {
@@ -49,12 +50,26 @@ public class StandardStatusSnapshot implements StatusSnapshot {
 
     @Override
     public Set<MetricDescriptor<?>> getMetricDescriptors() {
-        return metricDescriptors;
+        if (counterValues == null || counterValues.isEmpty()) {
+            return metricDescriptors;
+        } else {
+            if (metricDescriptorsWithCounters == null) {
+                metricDescriptorsWithCounters = new LinkedHashSet<>();
+                metricDescriptorsWithCounters.addAll(metricDescriptors);
+                metricDescriptorsWithCounters.addAll(counterValues.keySet());
+            }
+
+            return metricDescriptorsWithCounters;
+        }
     }
 
     @Override
     public Long getStatusMetric(final MetricDescriptor<?> descriptor) {
-        return values[descriptor.getMetricIdentifier()];
+        if (descriptor.isCounter()) {
+            return counterValues.get(descriptor);
+        } else {
+            return values[descriptor.getMetricIdentifier()];
+        }
     }
 
     public void setTimestamp(final Date timestamp) {
@@ -75,7 +90,7 @@ public class StandardStatusSnapshot implements StatusSnapshot {
     }
 
     public StandardStatusSnapshot withoutCounters() {
-        if (counterValues == null) {
+        if (counterValues == null || counterValues.isEmpty()) {
             return this;
         }
 
@@ -90,7 +105,7 @@ public class StandardStatusSnapshot implements StatusSnapshot {
             @Override
             public StatusSnapshot reduce(final List<StatusSnapshot> values) {
                 Date reducedTimestamp = null;
-                final Set<MetricDescriptor<?>> allDescriptors = new LinkedHashSet<>(metricDescriptors);
+                final Set<MetricDescriptor<?>> allDescriptors = new LinkedHashSet<>(getMetricDescriptors());
 
                 for (final StatusSnapshot statusSnapshot : values) {
                     if (reducedTimestamp == null) {

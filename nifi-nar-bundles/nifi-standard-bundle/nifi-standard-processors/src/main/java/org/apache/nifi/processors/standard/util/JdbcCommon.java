@@ -36,9 +36,11 @@ import static java.sql.Types.NCHAR;
 import static java.sql.Types.NCLOB;
 import static java.sql.Types.NUMERIC;
 import static java.sql.Types.NVARCHAR;
+import static java.sql.Types.OTHER;
 import static java.sql.Types.REAL;
 import static java.sql.Types.ROWID;
 import static java.sql.Types.SMALLINT;
+import static java.sql.Types.SQLXML;
 import static java.sql.Types.TIME;
 import static java.sql.Types.TIMESTAMP;
 import static java.sql.Types.TIMESTAMP_WITH_TIMEZONE;
@@ -65,6 +67,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLDataException;
 import java.sql.SQLException;
+import java.sql.SQLXML;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -90,11 +93,14 @@ import org.apache.avro.SchemaBuilder.BaseTypeBuilder;
 import org.apache.avro.SchemaBuilder.FieldAssembler;
 import org.apache.avro.SchemaBuilder.NullDefault;
 import org.apache.avro.SchemaBuilder.UnionAccumulator;
+import org.apache.avro.file.CodecFactory;
+import org.apache.avro.UnresolvedUnionException;
 import org.apache.avro.file.DataFileWriter;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.DatumWriter;
+import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.avro.AvroTypeUtil;
 import org.apache.nifi.components.PropertyDescriptor;
@@ -211,20 +217,24 @@ public class JdbcCommon {
     }
 
     public static class AvroConversionOptions {
+
         private final String recordName;
         private final int maxRows;
         private final boolean convertNames;
         private final boolean useLogicalTypes;
         private final int defaultPrecision;
         private final int defaultScale;
+        private final CodecFactory codec;
 
-        private AvroConversionOptions(String recordName, int maxRows, boolean convertNames, boolean useLogicalTypes, int defaultPrecision, int defaultScale) {
+        private AvroConversionOptions(String recordName, int maxRows, boolean convertNames, boolean useLogicalTypes,
+                int defaultPrecision, int defaultScale, CodecFactory codec) {
             this.recordName = recordName;
             this.maxRows = maxRows;
             this.convertNames = convertNames;
             this.useLogicalTypes = useLogicalTypes;
             this.defaultPrecision = defaultPrecision;
             this.defaultScale = defaultScale;
+            this.codec = codec;
         }
 
         public static Builder builder() {
@@ -238,6 +248,7 @@ public class JdbcCommon {
             private boolean useLogicalTypes = false;
             private int defaultPrecision = DEFAULT_PRECISION_VALUE;
             private int defaultScale = DEFAULT_SCALE_VALUE;
+            private CodecFactory codec = CodecFactory.nullCodec();
 
             /**
              * Specify a priori record name to use if it cannot be determined from the result set.
@@ -272,8 +283,13 @@ public class JdbcCommon {
                 return this;
             }
 
+            public Builder codecFactory(String codec) {
+                this.codec = AvroUtil.getCodecFactory(codec);
+                return this;
+            }
+
             public AvroConversionOptions build() {
-                return new AvroConversionOptions(recordName, maxRows, convertNames, useLogicalTypes, defaultPrecision, defaultScale);
+                return new AvroConversionOptions(recordName, maxRows, convertNames, useLogicalTypes, defaultPrecision, defaultScale, codec);
             }
         }
     }
@@ -285,6 +301,7 @@ public class JdbcCommon {
 
         final DatumWriter<GenericRecord> datumWriter = new GenericDatumWriter<>(schema);
         try (final DataFileWriter<GenericRecord> dataFileWriter = new DataFileWriter<>(datumWriter)) {
+            dataFileWriter.setCodec(options.codec);
             dataFileWriter.create(schema, outStream);
 
             final ResultSetMetaData meta = rs.getMetaData();
@@ -437,8 +454,11 @@ public class JdbcCommon {
                             } else {
                                 rec.put(i - 1, value);
                             }
+                        } else if ((value instanceof Long) && meta.getPrecision(i) < MAX_DIGITS_IN_INT) {
+                            int intValue = ((Long)value).intValue();
+                            rec.put(i-1, intValue);
                         } else {
-                            rec.put(i - 1, value);
+                            rec.put(i-1, value);
                         }
 
                     } else if (value instanceof Date) {
@@ -450,6 +470,8 @@ public class JdbcCommon {
                             rec.put(i - 1, value.toString());
                         }
 
+                    } else if (value instanceof java.sql.SQLXML) {
+                        rec.put(i - 1, ((SQLXML) value).getString());
                     } else {
                         // The different types that we support are numbers (int, long, double, float),
                         // as well as boolean values and Strings. Since Avro doesn't provide
@@ -458,8 +480,22 @@ public class JdbcCommon {
                         rec.put(i - 1, value.toString());
                     }
                 }
-                dataFileWriter.append(rec);
-                nrOfRows += 1;
+                try {
+                    dataFileWriter.append(rec);
+                    nrOfRows += 1;
+                } catch (DataFileWriter.AppendWriteException awe) {
+                    Throwable rootCause = ExceptionUtils.getRootCause(awe);
+                    if(rootCause instanceof UnresolvedUnionException) {
+                        UnresolvedUnionException uue = (UnresolvedUnionException) rootCause;
+                        throw new RuntimeException(
+                                "Unable to resolve union for value " + uue.getUnresolvedDatum() +
+                                " with type " + uue.getUnresolvedDatum().getClass().getCanonicalName() +
+                                " while appending record " + rec,
+                                awe);
+                    } else {
+                        throw awe;
+                    }
+                }
 
                 if (options.maxRows > 0 && nrOfRows == options.maxRows)
                     break;
@@ -533,6 +569,8 @@ public class JdbcCommon {
                 case VARCHAR:
                 case CLOB:
                 case NCLOB:
+                case OTHER:
+                case SQLXML:
                     builder.name(columnName).type().unionOf().nullBuilder().endNull().and().stringType().endUnion().noDefault();
                     break;
 

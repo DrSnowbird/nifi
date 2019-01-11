@@ -26,6 +26,8 @@ import org.apache.nifi.annotation.behavior.SystemResource;
 import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.attribute.expression.language.exception.AttributeExpressionLanguageException;
+import org.apache.nifi.attribute.expression.language.exception.IllegalAttributeException;
 import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.PropertyValue;
@@ -47,14 +49,13 @@ import org.apache.nifi.processor.io.InputStreamCallback;
 import org.apache.nifi.processor.io.OutputStreamCallback;
 import org.apache.nifi.processor.io.StreamCallback;
 import org.apache.nifi.processor.util.StandardValidators;
-import org.apache.nifi.processors.standard.util.NLKBufferedReader;
 import org.apache.nifi.stream.io.StreamUtils;
+import org.apache.nifi.stream.io.util.LineDemarcator;
 import org.apache.nifi.util.StopWatch;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.Charset;
@@ -80,9 +81,7 @@ import java.util.regex.Pattern;
 @SystemResourceConsideration(resource = SystemResource.MEMORY)
 public class ReplaceText extends AbstractProcessor {
 
-    private static Pattern QUOTED_GROUP_REF_PATTERN = Pattern.compile("\\$\\{\\s*?'\\$\\d+?'.+?\\}");
-    private static Pattern DOUBLE_QUOTED_GROUP_REF_PATTERN = Pattern.compile("\\$\\{\\s*?\"\\$\\d+?\".+?\\}");
-    private static Pattern LITERAL_QUOTED_PATTERN = Pattern.compile("literal\\(('.*?')\\)",Pattern.DOTALL);
+    private static Pattern REPLACEMENT_NORMALIZATION_PATTERN = Pattern.compile("(\\$\\D)");
 
     // Constants
     public static final String LINE_BY_LINE = "Line-by-Line";
@@ -295,27 +294,31 @@ public class ReplaceText extends AbstractProcessor {
         final StopWatch stopWatch = new StopWatch(true);
 
         try {
-
             flowFile = replacementStrategyExecutor.replace(flowFile, session, context, evaluateMode, charset, maxBufferSize);
-
         } catch (StackOverflowError e) {
             // Some regular expressions can produce many matches on large input data size using recursive code
             // do not log the StackOverflowError stack trace
-            logger.info("Transferred {} to 'failure' due to {}", new Object[] {flowFile, e.toString()});
+            logger.info("Transferred {} to 'failure' due to {}", new Object[] { flowFile, e.toString() });
+            session.transfer(flowFile, REL_FAILURE);
+            return;
+        } catch (IllegalAttributeException | AttributeExpressionLanguageException e) {
+            logger.warn("Transferred {} to 'failure' due to {}", new Object[] { flowFile, e.toString() }, e);
             session.transfer(flowFile, REL_FAILURE);
             return;
         }
-
         logger.info("Transferred {} to 'success'", new Object[] {flowFile});
         session.getProvenanceReporter().modifyContent(flowFile, stopWatch.getElapsed(TimeUnit.MILLISECONDS));
         session.transfer(flowFile, REL_SUCCESS);
     }
 
-
     // If we find a back reference that is not valid, then we will treat it as a literal string. For example, if we have 3 capturing
     // groups and the Replacement Value has the value is "I owe $8 to him", then we want to treat the $8 as a literal "$8", rather
-    // than attempting to use it as a back reference.  We do this even if there are no capture groups.
+    // than attempting to use it as a back reference.
     private static String escapeLiteralBackReferences(final String unescaped, final int numCapturingGroups) {
+        if (numCapturingGroups == 0) {
+            return unescaped;
+        }
+
         String value = unescaped;
         final Matcher backRefMatcher = unescapedBackReferencePattern.matcher(value); // consider unescaped back references
         while (backRefMatcher.find()) {
@@ -338,7 +341,7 @@ public class ReplaceText extends AbstractProcessor {
                 final StringBuilder sb = new StringBuilder(value.length() + 1);
                 final int groupStart = backRefMatcher.start(1);
 
-                sb.append(value.substring(0, groupStart - 1));
+                sb.append(value, 0, groupStart - 1);
                 sb.append("\\");
                 sb.append(value.substring(groupStart - 1));
                 value = sb.toString();
@@ -366,11 +369,11 @@ public class ReplaceText extends AbstractProcessor {
                 flowFile = session.write(flowFile, new StreamCallback() {
                     @Override
                     public void process(final InputStream in, final OutputStream out) throws IOException {
-                        try (NLKBufferedReader br = new NLKBufferedReader(new InputStreamReader(in, charset), maxBufferSize);
-                            BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset));) {
+                        try (final LineDemarcator demarcator = new LineDemarcator(in, charset, maxBufferSize, 8192);
+                            final BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset))) {
 
                             String line;
-                            while ((line = br.readLine()) != null) {
+                            while ((line = demarcator.nextLine()) != null) {
                                 // We need to determine what line ending was used and use that after our replacement value.
                                 lineEndingBuilder.setLength(0);
                                 for (int i = line.length() - 1; i >= 0; i--) {
@@ -419,10 +422,11 @@ public class ReplaceText extends AbstractProcessor {
                 flowFile = session.write(flowFile, new StreamCallback() {
                     @Override
                     public void process(final InputStream in, final OutputStream out) throws IOException {
-                        try (NLKBufferedReader br = new NLKBufferedReader(new InputStreamReader(in, charset), maxBufferSize);
-                            BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset));) {
+                        try (final LineDemarcator demarcator = new LineDemarcator(in, charset, maxBufferSize, 8192);
+                            final BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset))) {
+
                             String oneLine;
-                            while (null != (oneLine = br.readLine())) {
+                            while (null != (oneLine = demarcator.nextLine())) {
                                 final String updatedValue = replacementValue.concat(oneLine);
                                 bw.write(updatedValue);
                             }
@@ -457,10 +461,11 @@ public class ReplaceText extends AbstractProcessor {
                 flowFile = session.write(flowFile, new StreamCallback() {
                     @Override
                     public void process(final InputStream in, final OutputStream out) throws IOException {
-                        try (NLKBufferedReader br = new NLKBufferedReader(new InputStreamReader(in, charset), maxBufferSize);
-                            BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset));) {
+                        try (final LineDemarcator demarcator = new LineDemarcator(in, charset, maxBufferSize, 8192);
+                            final BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset))) {
+
                             String oneLine;
-                            while (null != (oneLine = br.readLine())) {
+                            while (null != (oneLine = demarcator.nextLine())) {
                                 // we need to find the first carriage return or new-line so that we can append the new value
                                 // before the line separate. However, we don't want to do this using a regular expression due
                                 // to performance concerns. So we will find the first occurrence of either \r or \n and use
@@ -523,12 +528,8 @@ public class ReplaceText extends AbstractProcessor {
 
         @Override
         public FlowFile replace(final FlowFile flowFile, final ProcessSession session, final ProcessContext context, final String evaluateMode, final Charset charset, final int maxBufferSize) {
-            final AttributeValueDecorator quotedAttributeDecorator = new AttributeValueDecorator() {
-                @Override
-                public String decorate(final String attributeValue) {
-                    return Pattern.quote(attributeValue);
-                }
-            };
+            final AttributeValueDecorator quotedAttributeDecorator = Pattern::quote;
+
             final String searchRegex = context.getProperty(SEARCH_VALUE).evaluateAttributeExpressions(flowFile, quotedAttributeDecorator).getValue();
             final Pattern searchPattern = Pattern.compile(searchRegex);
 
@@ -545,24 +546,29 @@ public class ReplaceText extends AbstractProcessor {
                 final String contentString = new String(buffer, 0, flowFileSize, charset);
                 additionalAttrs.clear();
                 final Matcher matcher = searchPattern.matcher(contentString);
-                if (matcher.find()) {
-                    for (int i = 1; i <= matcher.groupCount(); i++) {
-                        final String groupValue = matcher.group(i);
-                        additionalAttrs.put("$" + i, groupValue);
+
+                final PropertyValue replacementValueProperty = context.getProperty(REPLACEMENT_VALUE);
+
+                int matches = 0;
+                final StringBuffer sb = new StringBuffer();
+                while (matcher.find()) {
+                    matches++;
+
+                    for (int i=0; i <= matcher.groupCount(); i++) {
+                        additionalAttrs.put("$" + i, matcher.group(i));
                     }
 
-                    // prepare the string and do the regex replace first
-                    // then evaluate the EL on the result
-                    String replacement = context.getProperty(REPLACEMENT_VALUE).getValue();
+                    String replacement = replacementValueProperty.evaluateAttributeExpressions(flowFile, additionalAttrs, escapeBackRefDecorator).getValue();
                     replacement = escapeLiteralBackReferences(replacement, numCapturingGroups);
-                    replacement = escapeExpressionDollarSigns(replacement);
-                    replacement = wrapLiterals(replacement);
-                    replacement = contentString.replaceAll(searchRegex, replacement);
-                    replacement = escapeForEvaluation(replacement);
+                    String replacementFinal = normalizeReplacementString(replacement);
 
-                    PropertyValue tempValue =  context.newPropertyValue(replacement);
-                    final String updatedValue = tempValue.evaluateAttributeExpressions(flowFile, additionalAttrs, null).getValue();
+                    matcher.appendReplacement(sb, replacementFinal);
+                }
 
+                if (matches > 0) {
+                    matcher.appendTail(sb);
+
+                    final String updatedValue = sb.toString();
                     updatedFlowFile = session.write(flowFile, new OutputStreamCallback() {
                         @Override
                         public void process(final OutputStream out) throws IOException {
@@ -570,36 +576,50 @@ public class ReplaceText extends AbstractProcessor {
                         }
                     });
                 } else {
-                    // If no match, just return the original. No need to write out any content.
                     return flowFile;
                 }
+
             } else {
                 updatedFlowFile = session.write(flowFile, new StreamCallback() {
                     @Override
                     public void process(final InputStream in, final OutputStream out) throws IOException {
-                        try (NLKBufferedReader br = new NLKBufferedReader(new InputStreamReader(in, charset), maxBufferSize);
-                            BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset))) {
+                        try (final LineDemarcator demarcator = new LineDemarcator(in, charset, maxBufferSize, 8192);
+                            final BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset))) {
+
                             String oneLine;
-                            while (null != (oneLine = br.readLine())) {
+
+                            final StringBuffer sb = new StringBuffer();
+                            Matcher matcher = null;
+
+                            while (null != (oneLine = demarcator.nextLine())) {
                                 additionalAttrs.clear();
-                                final Matcher matcher = searchPattern.matcher(oneLine);
-                                if (matcher.find()) {
-                                    for (int i = 1; i <= matcher.groupCount(); i++) {
-                                        final String groupValue = matcher.group(i);
-                                        additionalAttrs.put("$" + i, groupValue);
+                                if (matcher == null) {
+                                    matcher = searchPattern.matcher(oneLine);
+                                } else {
+                                    matcher.reset(oneLine);
+                                }
+
+                                int matches = 0;
+                                sb.setLength(0);
+
+                                while (matcher.find()) {
+                                    matches++;
+
+                                    for (int i=0; i <= matcher.groupCount(); i++) {
+                                        additionalAttrs.put("$" + i, matcher.group(i));
                                     }
 
-                                    // prepare the string and do the regex replace first
-                                    // then evaluate the EL on the result
-                                    String replacement = context.getProperty(REPLACEMENT_VALUE).getValue();
+                                    String replacement = context.getProperty(REPLACEMENT_VALUE).evaluateAttributeExpressions(flowFile, additionalAttrs, escapeBackRefDecorator).getValue();
                                     replacement = escapeLiteralBackReferences(replacement, numCapturingGroups);
-                                    replacement = escapeExpressionDollarSigns(replacement);
-                                    replacement = wrapLiterals(replacement);
-                                    replacement = oneLine.replaceAll(searchRegex, replacement);
-                                    replacement = escapeForEvaluation(replacement);
+                                    String replacementFinal = normalizeReplacementString(replacement);
 
-                                    PropertyValue tempValue =  context.newPropertyValue(replacement);
-                                    final String updatedValue = tempValue.evaluateAttributeExpressions(flowFile, additionalAttrs, null).getValue();
+                                    matcher.appendReplacement(sb, replacementFinal);
+                                }
+
+                                if (matches > 0) {
+                                    matcher.appendTail(sb);
+
+                                    final String updatedValue = sb.toString();
                                     bw.write(updatedValue);
                                 } else {
                                     // No match. Just write out the line as it was.
@@ -631,14 +651,7 @@ public class ReplaceText extends AbstractProcessor {
         public FlowFile replace(FlowFile flowFile, final ProcessSession session, final ProcessContext context, final String evaluateMode, final Charset charset, final int maxBufferSize) {
 
             final String replacementValue = context.getProperty(REPLACEMENT_VALUE).evaluateAttributeExpressions(flowFile).getValue();
-
-            final AttributeValueDecorator quotedAttributeDecorator = new AttributeValueDecorator() {
-                @Override
-                public String decorate(final String attributeValue) {
-                    return Pattern.quote(attributeValue);
-                }
-            };
-
+            final AttributeValueDecorator quotedAttributeDecorator = Pattern::quote;
             final String searchValue = context.getProperty(SEARCH_VALUE).evaluateAttributeExpressions(flowFile, quotedAttributeDecorator).getValue();
 
             final int flowFileSize = (int) flowFile.getSize();
@@ -654,16 +667,34 @@ public class ReplaceText extends AbstractProcessor {
                     }
                 });
             } else {
+                final int initialBufferSize = (int) Math.min(flowFile.getSize(), 8192);
+                final Pattern searchPattern = Pattern.compile(searchValue, Pattern.LITERAL);
+
                 flowFile = session.write(flowFile, new StreamCallback() {
                     @Override
                     public void process(final InputStream in, final OutputStream out) throws IOException {
-                        try (NLKBufferedReader br = new NLKBufferedReader(new InputStreamReader(in, charset), maxBufferSize);
-                            BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset))) {
+                        try (final LineDemarcator demarcator = new LineDemarcator(in, charset, maxBufferSize, initialBufferSize);
+                            final BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(out, charset))) {
+
                             String oneLine;
-                            while (null != (oneLine = br.readLine())) {
-                                // Interpreting the search and replacement values as char sequences
-                                final String updatedValue = oneLine.replace(searchValue, replacementValue);
-                                bw.write(updatedValue);
+                            while (null != (oneLine = demarcator.nextLine())) {
+                                int matches = 0;
+                                int lastEnd = 0;
+
+                                final Matcher matcher = searchPattern.matcher(oneLine);
+                                while (matcher.find()) {
+                                    bw.write(oneLine, lastEnd, matcher.start() - lastEnd);
+                                    bw.write(replacementValue);
+                                    matches++;
+
+                                    lastEnd = matcher.end();
+                                }
+
+                                if (matches > 0) {
+                                    bw.write(oneLine, lastEnd, oneLine.length() - lastEnd);
+                                } else {
+                                    bw.write(oneLine);
+                                }
                             }
                         }
                     }
@@ -679,76 +710,16 @@ public class ReplaceText extends AbstractProcessor {
     }
 
     /**
-     * Wraps '$1' with the {@code literal} function for EL evaluation.
-     * @param possibleLiteral the {@code String} to evaluate.
-     * @return {@code String} with literals wrapped.  If no literals or Expression Lanaguage present the passed string
-     * is returned.
-     */
-    private static String wrapLiterals(String possibleLiteral) {
-        String replacementFinal = possibleLiteral;
-        if (!possibleLiteral.contains("${")) {
-            return possibleLiteral;
-        }
-
-        if (QUOTED_GROUP_REF_PATTERN.matcher(replacementFinal).find()) {
-            replacementFinal = replacementFinal.replaceAll("(\\$\\{\\s*?)('\\$\\d+?')(.*\\})", "$1literal($2)$3");
-        }
-
-        if (DOUBLE_QUOTED_GROUP_REF_PATTERN.matcher(replacementFinal).find()) {
-            replacementFinal = replacementFinal.replaceAll("(\\$\\{\\s*?)(\"\\$\\d+?\")(.*\\})", "$1literal($2)$3");
-        }
-
-        return replacementFinal;
-    }
-
-    /**
      * If we have a '$' followed by anything other than a number, then escape
-     * it if it is not already escaped. E.g., '$d' becomes '\$d' so that it can be used as a literal in a
+     * it. E.g., '$d' becomes '\$d' so that it can be used as a literal in a
      * regex.
      */
-    private static String escapeExpressionDollarSigns(String replacement) {
-
-        // are there expressions or group references
-        if (replacement.indexOf('$') == -1) {
-            return replacement;
+    private static String normalizeReplacementString(String replacement) {
+        String replacementFinal = replacement;
+        if (REPLACEMENT_NORMALIZATION_PATTERN.matcher(replacement).find()) {
+            replacementFinal = Matcher.quoteReplacement(replacement);
         }
-        StringBuilder sb = new StringBuilder();
-        boolean lastWasEscape = false;
-        for (int i=0; i<replacement.length(); i++) {
-            char c = replacement.charAt(i);
-            if (c == '\\' ) {
-                lastWasEscape = true;
-            } else {
-                if ( c == '$') {
-                    if (!lastWasEscape && !Character.isDigit(replacement.charAt(i+1))) {
-                        sb.append('\\');
-                    }
-                }
-                lastWasEscape = false;
-            }
-            sb.append(c);
-        }
-       return sb.toString();
-    }
-
-    /**
-     * Escapes a {@code String} containing literal('') EL values.
-     * @param contentString the {@code String}
-     * @return the escaped {@code String}. If no literal() is present, then the input {@code String} will be returned
-     */
-    private static String escapeForEvaluation(String contentString) {
-        final Matcher matcher = LITERAL_QUOTED_PATTERN.matcher(contentString);
-        String returnString = contentString;
-        while(matcher.find()) {
-            for (int i = 1; i <= matcher.groupCount(); i ++) {
-                String replacement = matcher.group(i)
-                    .replaceAll("\\n","\\\\n")
-                    .replaceAll("\\r","\\\\r")
-                    .replaceAll("\\t","\\\\t");
-                returnString = new StringBuilder(returnString).replace(matcher.start(i),matcher.end(i),replacement).toString();
-            }
-        }
-        return returnString;
+        return replacementFinal;
     }
 
     private interface ReplacementStrategyExecutor {

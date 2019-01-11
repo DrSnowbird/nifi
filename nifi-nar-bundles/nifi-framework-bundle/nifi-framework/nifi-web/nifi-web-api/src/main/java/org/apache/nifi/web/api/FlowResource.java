@@ -26,6 +26,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.authorization.Authorizer;
 import org.apache.nifi.authorization.RequestAction;
 import org.apache.nifi.authorization.resource.Authorizable;
+import org.apache.nifi.authorization.resource.OperationAuthorizable;
 import org.apache.nifi.authorization.user.NiFiUser;
 import org.apache.nifi.authorization.user.NiFiUserUtils;
 import org.apache.nifi.bundle.Bundle;
@@ -41,7 +42,7 @@ import org.apache.nifi.controller.ScheduledState;
 import org.apache.nifi.controller.service.ControllerServiceNode;
 import org.apache.nifi.controller.service.ControllerServiceState;
 import org.apache.nifi.groups.ProcessGroup;
-import org.apache.nifi.nar.NarClassLoaders;
+import org.apache.nifi.nar.NarClassLoadersHolder;
 import org.apache.nifi.registry.client.NiFiRegistryException;
 import org.apache.nifi.util.NiFiProperties;
 import org.apache.nifi.web.IllegalClusterResourceRequestException;
@@ -378,7 +379,7 @@ public class FlowResource extends ApplicationResource {
     // -------------------
 
     /**
-     * Retrieves all the of controller services in this NiFi.
+     * Retrieves controller services for reporting tasks in this NiFi.
      *
      * @return A controllerServicesEntity.
      */
@@ -387,7 +388,7 @@ public class FlowResource extends ApplicationResource {
     @Produces(MediaType.APPLICATION_JSON)
     @Path("controller/controller-services")
     @ApiOperation(
-            value = "Gets all controller services",
+            value = "Gets controller services for reporting tasks",
             response = ControllerServicesEntity.class,
             authorizations = {
                     @Authorization(value = "Read - /flow")
@@ -537,7 +538,7 @@ public class FlowResource extends ApplicationResource {
             response = ScheduleComponentsEntity.class,
             authorizations = {
                     @Authorization(value = "Read - /flow"),
-                    @Authorization(value = "Write - /{component-type}/{uuid} - For every component being scheduled/unscheduled")
+                    @Authorization(value = "Write - /{component-type}/{uuid} or /operation/{component-type}/{uuid} - For every component being scheduled/unscheduled")
             }
     )
     @ApiResponses(
@@ -626,7 +627,7 @@ public class FlowResource extends ApplicationResource {
                 // ensure authorized for each processor we will attempt to schedule
                 group.findAllProcessors().stream()
                         .filter(getProcessorFilter.get())
-                        .filter(processor -> processor.isAuthorized(authorizer, RequestAction.WRITE, NiFiUserUtils.getNiFiUser()))
+                        .filter(processor -> OperationAuthorizable.isOperationAuthorized(processor, authorizer, NiFiUserUtils.getNiFiUser()))
                         .forEach(processor -> {
                             componentIds.add(processor.getIdentifier());
                         });
@@ -634,7 +635,7 @@ public class FlowResource extends ApplicationResource {
                 // ensure authorized for each input port we will attempt to schedule
                 group.findAllInputPorts().stream()
                     .filter(getPortFilter.get())
-                        .filter(inputPort -> inputPort.isAuthorized(authorizer, RequestAction.WRITE, NiFiUserUtils.getNiFiUser()))
+                        .filter(inputPort -> OperationAuthorizable.isOperationAuthorized(inputPort, authorizer, NiFiUserUtils.getNiFiUser()))
                         .forEach(inputPort -> {
                             componentIds.add(inputPort.getIdentifier());
                         });
@@ -642,7 +643,7 @@ public class FlowResource extends ApplicationResource {
                 // ensure authorized for each output port we will attempt to schedule
                 group.findAllOutputPorts().stream()
                         .filter(getPortFilter.get())
-                        .filter(outputPort -> outputPort.isAuthorized(authorizer, RequestAction.WRITE, NiFiUserUtils.getNiFiUser()))
+                        .filter(outputPort -> OperationAuthorizable.isOperationAuthorized(outputPort, authorizer, NiFiUserUtils.getNiFiUser()))
                         .forEach(outputPort -> {
                             componentIds.add(outputPort.getIdentifier());
                         });
@@ -685,7 +686,7 @@ public class FlowResource extends ApplicationResource {
                     // ensure access to every component being scheduled
                     requestComponentsToSchedule.keySet().forEach(componentId -> {
                         final Authorizable connectable = lookup.getLocalConnectable(componentId);
-                        connectable.authorize(authorizer, RequestAction.WRITE, NiFiUserUtils.getNiFiUser());
+                        OperationAuthorizable.authorizeOperation(connectable, authorizer, NiFiUserUtils.getNiFiUser());
                     });
                 },
                 () -> {
@@ -730,7 +731,7 @@ public class FlowResource extends ApplicationResource {
         response = ActivateControllerServicesEntity.class,
         authorizations = {
             @Authorization(value = "Read - /flow"),
-            @Authorization(value = "Write - /{component-type}/{uuid} - For every service being enabled/disabled")
+            @Authorization(value = "Write - /{component-type}/{uuid} or /operation/{component-type}/{uuid} - For every service being enabled/disabled")
         })
     @ApiResponses(
             value = {
@@ -787,7 +788,7 @@ public class FlowResource extends ApplicationResource {
 
                 group.findAllControllerServices().stream()
                     .filter(filter)
-                    .filter(service -> service.isAuthorized(authorizer, RequestAction.WRITE, NiFiUserUtils.getNiFiUser()))
+                    .filter(service -> OperationAuthorizable.isOperationAuthorized(service, authorizer, NiFiUserUtils.getNiFiUser()))
                     .forEach(service -> componentIds.add(service.getIdentifier()));
                 return componentIds;
             });
@@ -827,7 +828,7 @@ public class FlowResource extends ApplicationResource {
                     // ensure access to every component being scheduled
                     requestComponentsToSchedule.keySet().forEach(componentId -> {
                         final Authorizable authorizable = lookup.getControllerService(componentId).getAuthorizable();
-                        authorizable.authorize(authorizer, RequestAction.WRITE, NiFiUserUtils.getNiFiUser());
+                        OperationAuthorizable.authorizeOperation(authorizable, authorizer, NiFiUserUtils.getNiFiUser());
                     });
                 },
             () -> serviceFacade.verifyActivateControllerServices(id, desiredState, requestComponentRevisions.keySet()),
@@ -1351,7 +1352,7 @@ public class FlowResource extends ApplicationResource {
         final NiFiProperties properties = getProperties();
         aboutDTO.setContentViewerUrl(properties.getProperty(NiFiProperties.CONTENT_VIEWER_URL));
 
-        final Bundle frameworkBundle = NarClassLoaders.getInstance().getFrameworkBundle();
+        final Bundle frameworkBundle = NarClassLoadersHolder.getInstance().getFrameworkBundle();
         if (frameworkBundle != null) {
             final BundleDetails frameworkDetails = frameworkBundle.getBundleDetails();
 

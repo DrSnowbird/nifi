@@ -16,8 +16,12 @@
  */
 package org.apache.nifi.jms.processors;
 
-import java.util.Map;
-import java.util.Map.Entry;
+import org.apache.nifi.logging.ComponentLog;
+import org.springframework.jms.connection.CachingConnectionFactory;
+import org.springframework.jms.core.JmsTemplate;
+import org.springframework.jms.core.MessageCreator;
+import org.springframework.jms.core.SessionCallback;
+import org.springframework.jms.support.JmsHeaders;
 
 import javax.jms.BytesMessage;
 import javax.jms.Destination;
@@ -27,13 +31,11 @@ import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 import javax.jms.Topic;
-
-import org.apache.nifi.logging.ComponentLog;
-import org.springframework.jms.connection.CachingConnectionFactory;
-import org.springframework.jms.core.JmsTemplate;
-import org.springframework.jms.core.MessageCreator;
-import org.springframework.jms.core.SessionCallback;
-import org.springframework.jms.support.JmsHeaders;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.stream.Collectors;
 
 /**
  * Generic publisher of messages to JMS compliant messaging system.
@@ -61,10 +63,6 @@ final class JMSPublisher extends JMSWorker {
         });
     }
 
-    void publish(String destinationName, String messageText) {
-        this.publish(destinationName, messageText, null);
-    }
-
     void publish(String destinationName, String messageText, final Map<String, String> flowFileAttributes) {
         this.jmsTemplate.send(destinationName, new MessageCreator() {
             @Override
@@ -78,11 +76,14 @@ final class JMSPublisher extends JMSWorker {
 
     void setMessageHeaderAndProperties(final Message message, final Map<String, String> flowFileAttributes) throws JMSException {
         if (flowFileAttributes != null && !flowFileAttributes.isEmpty()) {
-            for (Entry<String, String> entry : flowFileAttributes.entrySet()) {
+
+            Map<String, String> flowFileAttributesToSend = flowFileAttributes.entrySet().stream()
+                    .filter(entry -> !entry.getKey().contains("-") && !entry.getKey().contains(".")) // '-' and '.' are illegal chars in JMS property names
+                    .collect(Collectors.toMap(Entry::getKey, Entry::getValue));
+
+            for (Entry<String, String> entry : flowFileAttributesToSend.entrySet()) {
                 try {
-                    if (!entry.getKey().startsWith(JmsHeaders.PREFIX) && !entry.getKey().contains("-") && !entry.getKey().contains(".")) {// '-' and '.' are illegal char in JMS prop names
-                        message.setStringProperty(entry.getKey(), entry.getValue());
-                    } else if (entry.getKey().equals(JmsHeaders.DELIVERY_MODE)) {
+                    if (entry.getKey().equals(JmsHeaders.DELIVERY_MODE)) {
                         message.setJMSDeliveryMode(Integer.parseInt(entry.getValue()));
                     } else if (entry.getKey().equals(JmsHeaders.EXPIRATION)) {
                         message.setJMSExpiration(Integer.parseInt(entry.getValue()));
@@ -110,6 +111,11 @@ final class JMSPublisher extends JMSWorker {
                         } else {
                             logUnbuildableDestination(entry.getKey(), JmsHeaders.DESTINATION);
                         }
+                    } else {
+                        // not a special attribute handled above, so send it as a property using the specified property type
+                        String type = flowFileAttributes.getOrDefault(entry.getKey().concat(".type"), "unknown").toLowerCase();
+                        propertySetterMap.getOrDefault(type, JmsPropertySetterEnum.STRING)
+                                .setProperty(message, entry.getKey(), entry.getValue());
                     }
                 } catch (NumberFormatException ne) {
                     this.processLog.warn("Incompatible value for attribute " + entry.getKey()
@@ -145,5 +151,56 @@ final class JMSPublisher extends JMSWorker {
         }
 
         return destination;
+    }
+
+    /**
+     * Implementations of this interface use {@link javax.jms.Message} methods to set strongly typed properties.
+     */
+    public interface JmsPropertySetter {
+        void setProperty(final Message message, final String name, final String value) throws JMSException, NumberFormatException;
+    }
+
+    public enum JmsPropertySetterEnum implements JmsPropertySetter {
+        BOOLEAN( (message, name, value) -> {
+            message.setBooleanProperty(name, Boolean.parseBoolean(value));
+        } ),
+        BYTE( (message, name, value) -> {
+            message.setByteProperty(name, Byte.parseByte(value));
+        } ),
+        SHORT( (message, name, value) -> {
+            message.setShortProperty(name, Short.parseShort(value));
+        } ),
+        INTEGER( (message, name, value) -> {
+            message.setIntProperty(name, Integer.parseInt(value));
+        } ),
+        LONG( (message, name, value) -> {
+            message.setLongProperty(name, Long.parseLong(value));
+        } ),
+        FLOAT( (message, name, value) -> {
+            message.setFloatProperty(name, Float.parseFloat(value));
+        } ),
+        DOUBLE( (message, name, value) -> {
+            message.setDoubleProperty(name, Double.parseDouble(value));
+        } ),
+        STRING( (message, name, value) -> {
+            message.setStringProperty(name, value);
+        } );
+
+        private final JmsPropertySetter setter;
+        JmsPropertySetterEnum(JmsPropertySetter setter) {
+            this.setter = setter;
+        }
+
+        public void setProperty(Message message, String name, String value) throws JMSException, NumberFormatException {
+            setter.setProperty(message, name, value);
+        }
+    }
+
+    /**
+     * This map helps us avoid using JmsPropertySetterEnum.valueOf and dealing with IllegalArgumentException on failed lookup.
+     */
+    public static Map<String, JmsPropertySetterEnum> propertySetterMap = new HashMap<>();
+    static {
+        Arrays.stream(JmsPropertySetterEnum.values()).forEach(e -> propertySetterMap.put(e.name().toLowerCase(), e));
     }
 }

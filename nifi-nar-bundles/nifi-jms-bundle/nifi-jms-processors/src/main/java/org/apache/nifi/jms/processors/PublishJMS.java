@@ -16,22 +16,13 @@
  */
 package org.apache.nifi.jms.processors;
 
-import java.io.StringWriter;
-import java.nio.charset.Charset;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
-
-import javax.jms.Destination;
-import javax.jms.Message;
-
 import org.apache.commons.io.IOUtils;
-import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
 import org.apache.nifi.annotation.behavior.SystemResource;
+import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
@@ -46,6 +37,14 @@ import org.apache.nifi.stream.io.StreamUtils;
 import org.springframework.jms.connection.CachingConnectionFactory;
 import org.springframework.jms.core.JmsTemplate;
 import org.springframework.jms.support.JmsHeaders;
+
+import javax.jms.Destination;
+import javax.jms.Message;
+import java.io.StringWriter;
+import java.nio.charset.Charset;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * An implementation of JMS Message publishing {@link Processor} which upon each
@@ -72,7 +71,11 @@ import org.springframework.jms.support.JmsHeaders;
         @ReadsAttribute(attribute = JmsHeaders.TYPE, description = "This attribute becomes the JMSType message header. Must be an integer."),
         @ReadsAttribute(attribute = JmsHeaders.REPLY_TO, description = "This attribute becomes the JMSReplyTo message header. Must be an integer."),
         @ReadsAttribute(attribute = JmsHeaders.DESTINATION, description = "This attribute becomes the JMSDestination message header. Must be an integer."),
-        @ReadsAttribute(attribute = "other attributes", description = "All other attributes that do not start with " + JmsHeaders.PREFIX + " are added as message properties.")
+        @ReadsAttribute(attribute = "other attributes", description = "All other attributes that do not start with " + JmsHeaders.PREFIX + " are added as message properties."),
+        @ReadsAttribute(attribute = "other attributes .type", description = "When an attribute will be added as a message property, a second attribute of the same name but with an extra"
+        + " `.type` at the end will cause the message property to be sent using that strong type. For example, attribute `delay` with value `12000` and another attribute"
+        + " `delay.type` with value `integer` will cause a JMS message property `delay` to be sent as an Integer rather than a String. Supported types are boolean, byte,"
+        + " short, integer, long, float, double, and string (which is the default).")
 })
 @SeeAlso(value = { ConsumeJMS.class, JMSConnectionFactoryProvider.class })
 @SystemResourceConsideration(resource = SystemResource.MEMORY)

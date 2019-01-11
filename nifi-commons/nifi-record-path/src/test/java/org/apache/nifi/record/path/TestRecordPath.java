@@ -27,11 +27,14 @@ import java.sql.Date;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import org.apache.nifi.record.path.exception.RecordPathException;
 import org.apache.nifi.serialization.SimpleRecordSchema;
@@ -1023,6 +1026,133 @@ public class TestRecordPath {
         assertEquals("Jxohn Dxoe", RecordPath.compile("replaceRegex(/name, '(?<hello>[JD])', '${hello}x')").evaluate(record).getSelectedFields().findFirst().get().getValue());
 
         assertEquals("48ohn 48oe", RecordPath.compile("replaceRegex(/name, '(?<hello>[JD])', /id)").evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+    }
+
+    @Test
+    public void testReplaceRegexEscapedCharacters() {
+        final List<RecordField> fields = new ArrayList<>();
+        fields.add(new RecordField("id", RecordFieldType.INT.getDataType()));
+        fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
+
+        final RecordSchema schema = new SimpleRecordSchema(fields);
+
+        final Map<String, Object> values = new HashMap<>();
+        values.put("id", 48);
+        final Record record = new MapRecord(schema, values);
+
+        // Special character cases
+        values.put("name", "John Doe");
+        assertEquals("Replacing whitespace to new line",
+                "John\nDoe", RecordPath.compile("replaceRegex(/name, '[\\s]', '\\n')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "John\nDoe");
+        assertEquals("Replacing new line to whitespace",
+                "John Doe", RecordPath.compile("replaceRegex(/name, '\\n', ' ')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "John Doe");
+        assertEquals("Replacing whitespace to tab",
+                "John\tDoe", RecordPath.compile("replaceRegex(/name, '[\\s]', '\\t')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "John\tDoe");
+        assertEquals("Replacing tab to whitespace",
+                "John Doe", RecordPath.compile("replaceRegex(/name, '\\t', ' ')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+    }
+
+    @Test
+    public void testReplaceRegexEscapedQuotes() {
+
+        final List<RecordField> fields = new ArrayList<>();
+        fields.add(new RecordField("id", RecordFieldType.INT.getDataType()));
+        fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
+
+        final RecordSchema schema = new SimpleRecordSchema(fields);
+
+        final Map<String, Object> values = new HashMap<>();
+        values.put("id", 48);
+        final Record record = new MapRecord(schema, values);
+
+        // Quotes
+        // NOTE: At Java code, a single back-slash needs to be escaped with another-back slash, but needn't to do so at NiFi UI.
+        //       The test record path is equivalent to replaceRegex(/name, '\'', '"')
+        values.put("name", "'John' 'Doe'");
+        assertEquals("Replacing quote to double-quote",
+                "\"John\" \"Doe\"", RecordPath.compile("replaceRegex(/name, '\\'', '\"')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "\"John\" \"Doe\"");
+        assertEquals("Replacing double-quote to single-quote",
+                "'John' 'Doe'", RecordPath.compile("replaceRegex(/name, '\"', '\\'')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "'John' 'Doe'");
+        assertEquals("Replacing quote to double-quote, the function arguments are wrapped by double-quote",
+                "\"John\" \"Doe\"", RecordPath.compile("replaceRegex(/name, \"'\", \"\\\"\")")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "\"John\" \"Doe\"");
+        assertEquals("Replacing double-quote to single-quote, the function arguments are wrapped by double-quote",
+                "'John' 'Doe'", RecordPath.compile("replaceRegex(/name, \"\\\"\", \"'\")")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+    }
+
+    @Test
+    public void testReplaceRegexEscapedBackSlashes() {
+
+        final List<RecordField> fields = new ArrayList<>();
+        fields.add(new RecordField("id", RecordFieldType.INT.getDataType()));
+        fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
+
+        final RecordSchema schema = new SimpleRecordSchema(fields);
+
+        final Map<String, Object> values = new HashMap<>();
+        values.put("id", 48);
+        final Record record = new MapRecord(schema, values);
+
+        // Back-slash
+        // NOTE: At Java code, a single back-slash needs to be escaped with another-back slash, but needn't to do so at NiFi UI.
+        //       The test record path is equivalent to replaceRegex(/name, '\\', '/')
+        values.put("name", "John\\Doe");
+        assertEquals("Replacing a back-slash to forward-slash",
+                "John/Doe", RecordPath.compile("replaceRegex(/name, '\\\\', '/')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "John/Doe");
+        assertEquals("Replacing a forward-slash to back-slash",
+                "John\\Doe", RecordPath.compile("replaceRegex(/name, '/', '\\\\')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+    }
+
+    @Test
+    public void testReplaceRegexEscapedBrackets() {
+
+        final List<RecordField> fields = new ArrayList<>();
+        fields.add(new RecordField("id", RecordFieldType.INT.getDataType()));
+        fields.add(new RecordField("name", RecordFieldType.STRING.getDataType()));
+
+        final RecordSchema schema = new SimpleRecordSchema(fields);
+
+        final Map<String, Object> values = new HashMap<>();
+        values.put("id", 48);
+        final Record record = new MapRecord(schema, values);
+
+        // Brackets
+        values.put("name", "J[o]hn Do[e]");
+        assertEquals("Square brackets can be escaped with back-slash",
+                "J(o)hn Do(e)", RecordPath.compile("replaceRegex(replaceRegex(/name, '\\[', '('), '\\]', ')')")
+                .evaluate(record).getSelectedFields().findFirst().get().getValue());
+
+        values.put("name", "J(o)hn Do(e)");
+        assertEquals("Brackets can be escaped with back-slash",
+                "J[o]hn Do[e]", RecordPath.compile("replaceRegex(replaceRegex(/name, '\\(', '['), '\\)', ']')")
+                        .evaluate(record).getSelectedFields().findFirst().get().getValue());
     }
 
     @Test
@@ -1277,6 +1407,73 @@ public class TestRecordPath {
         final Record record = new MapRecord(schema, values);
 
         RecordPath.compile("toBytes(/s, \"NOT A REAL CHARSET\")").evaluate(record).getSelectedFields().findFirst().get().getValue();
+    }
+
+    @Test
+    public void testBase64Encode() {
+        final List<RecordField> fields = new ArrayList<>();
+        fields.add(new RecordField("firstName", RecordFieldType.STRING.getDataType()));
+        fields.add(new RecordField("lastName", RecordFieldType.STRING.getDataType()));
+        fields.add(new RecordField("b", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BYTE.getDataType())));
+        final RecordSchema schema = new SimpleRecordSchema(fields);
+
+        final List<Object> expectedValues = Arrays.asList(
+                Base64.getEncoder().encodeToString("John".getBytes(StandardCharsets.UTF_8)),
+                Base64.getEncoder().encodeToString("Doe".getBytes(StandardCharsets.UTF_8)),
+                Base64.getEncoder().encode("xyz".getBytes(StandardCharsets.UTF_8))
+        );
+        final Map<String, Object> values = new HashMap<>();
+        values.put("firstName", "John");
+        values.put("lastName", "Doe");
+        values.put("b", "xyz".getBytes(StandardCharsets.UTF_8));
+        final Record record = new MapRecord(schema, values);
+
+        assertEquals(Base64.getEncoder().encodeToString("John".getBytes(StandardCharsets.UTF_8)),
+                RecordPath.compile("base64Encode(/firstName)").evaluate(record).getSelectedFields().findFirst().get().getValue());
+        assertEquals(Base64.getEncoder().encodeToString("Doe".getBytes(StandardCharsets.UTF_8)),
+                RecordPath.compile("base64Encode(/lastName)").evaluate(record).getSelectedFields().findFirst().get().getValue());
+        assertTrue(Arrays.equals(Base64.getEncoder().encode("xyz".getBytes(StandardCharsets.UTF_8)),
+                (byte[]) RecordPath.compile("base64Encode(/b)").evaluate(record).getSelectedFields().findFirst().get().getValue()));
+        List<Object> actualValues = RecordPath.compile("base64Encode(/*)").evaluate(record).getSelectedFields().map(FieldValue::getValue).collect(Collectors.toList());
+        IntStream.range(0, 3).forEach(i -> {
+            Object expectedObject = expectedValues.get(i);
+            Object actualObject = actualValues.get(i);
+            if (actualObject instanceof String) {
+                assertEquals(expectedObject, actualObject);
+            } else if (actualObject instanceof byte[]) {
+                assertTrue(Arrays.equals((byte[]) expectedObject, (byte[]) actualObject));
+            }
+        });
+    }
+
+    @Test
+    public void testBase64Decode() {
+        final List<RecordField> fields = new ArrayList<>();
+        fields.add(new RecordField("firstName", RecordFieldType.STRING.getDataType()));
+        fields.add(new RecordField("lastName", RecordFieldType.STRING.getDataType()));
+        fields.add(new RecordField("b", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.BYTE.getDataType())));
+        final RecordSchema schema = new SimpleRecordSchema(fields);
+
+        final List<Object> expectedValues = Arrays.asList("John", "Doe", "xyz".getBytes(StandardCharsets.UTF_8));
+        final Map<String, Object> values = new HashMap<>();
+        values.put("firstName", Base64.getEncoder().encodeToString("John".getBytes(StandardCharsets.UTF_8)));
+        values.put("lastName", Base64.getEncoder().encodeToString("Doe".getBytes(StandardCharsets.UTF_8)));
+        values.put("b", Base64.getEncoder().encode("xyz".getBytes(StandardCharsets.UTF_8)));
+        final Record record = new MapRecord(schema, values);
+
+        assertEquals("John", RecordPath.compile("base64Decode(/firstName)").evaluate(record).getSelectedFields().findFirst().get().getValue());
+        assertEquals("Doe", RecordPath.compile("base64Decode(/lastName)").evaluate(record).getSelectedFields().findFirst().get().getValue());
+        assertTrue(Arrays.equals("xyz".getBytes(StandardCharsets.UTF_8), (byte[]) RecordPath.compile("base64Decode(/b)").evaluate(record).getSelectedFields().findFirst().get().getValue()));
+        List<Object> actualValues = RecordPath.compile("base64Decode(/*)").evaluate(record).getSelectedFields().map(FieldValue::getValue).collect(Collectors.toList());
+        IntStream.range(0, 3).forEach(i -> {
+            Object expectedObject = expectedValues.get(i);
+            Object actualObject = actualValues.get(i);
+            if (actualObject instanceof String) {
+                assertEquals(expectedObject, actualObject);
+            } else if (actualObject instanceof byte[]) {
+                assertTrue(Arrays.equals((byte[]) expectedObject, (byte[]) actualObject));
+            }
+        });
     }
 
     private List<RecordField> getDefaultFields() {

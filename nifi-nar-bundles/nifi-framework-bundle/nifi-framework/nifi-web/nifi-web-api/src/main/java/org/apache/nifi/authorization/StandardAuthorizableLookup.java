@@ -26,6 +26,7 @@ import org.apache.nifi.authorization.resource.ProvenanceDataAuthorizable;
 import org.apache.nifi.authorization.resource.ResourceFactory;
 import org.apache.nifi.authorization.resource.ResourceType;
 import org.apache.nifi.authorization.resource.RestrictedComponentsAuthorizableFactory;
+import org.apache.nifi.authorization.resource.OperationAuthorizable;
 import org.apache.nifi.authorization.resource.TenantAuthorizable;
 import org.apache.nifi.authorization.user.NiFiUser;
 import org.apache.nifi.bundle.BundleCoordinate;
@@ -189,7 +190,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
     @Override
     public ComponentAuthorizable getConfigurableComponent(ConfigurableComponent configurableComponent) {
         try {
-            return new ConfigurableComponentAuthorizable(configurableComponent);
+            return new ConfigurableComponentAuthorizable(configurableComponent, controllerFacade.getExtensionManager());
         } catch (final Exception e) {
             throw new AccessDeniedException("Unable to create component to verify if it references any Controller Services.");
         }
@@ -198,7 +199,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
     @Override
     public ComponentAuthorizable getProcessor(final String id) {
         final ProcessorNode processorNode = processorDAO.getProcessor(id);
-        return new ProcessorComponentAuthorizable(processorNode);
+        return new ProcessorComponentAuthorizable(processorNode, controllerFacade.getExtensionManager());
     }
 
     @Override
@@ -276,7 +277,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
     @Override
     public ProcessGroupAuthorizable getProcessGroup(final String id) {
         final ProcessGroup processGroup = processGroupDAO.getProcessGroup(id);
-        return new StandardProcessGroupAuthorizable(processGroup);
+        return new StandardProcessGroupAuthorizable(processGroup, controllerFacade.getExtensionManager());
     }
 
     @Override
@@ -297,7 +298,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
     @Override
     public ComponentAuthorizable getControllerService(final String id) {
         final ControllerServiceNode controllerService = controllerServiceDAO.getControllerService(id);
-        return new ControllerServiceComponentAuthorizable(controllerService);
+        return new ControllerServiceComponentAuthorizable(controllerService, controllerFacade.getExtensionManager());
     }
 
     @Override
@@ -361,7 +362,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
     @Override
     public ComponentAuthorizable getReportingTask(final String id) {
         final ReportingTaskNode reportingTaskNode = reportingTaskDAO.getReportingTask(id);
-        return new ReportingTaskComponentAuthorizable(reportingTaskNode);
+        return new ReportingTaskComponentAuthorizable(reportingTaskNode, controllerFacade.getExtensionManager());
     }
 
     @Override
@@ -468,63 +469,59 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
     }
 
     @Override
-    public Authorizable getAuthorizableFromResource(String resource) {
+    public Authorizable getAuthorizableFromResource(final String resource) {
         // parse the resource type
-        ResourceType resourceType = null;
-        for (ResourceType type : ResourceType.values()) {
-            if (resource.equals(type.getValue()) || resource.startsWith(type.getValue() + "/")) {
-                resourceType = type;
-            }
-        }
-
+        final ResourceType resourceType = ResourceType.fromRawValue(resource);
         if (resourceType == null) {
             throw new ResourceNotFoundException("Unrecognized resource: " + resource);
         }
 
         // if this is a policy, data or a provenance event resource, there should be another resource type
-        if (ResourceType.Policy.equals(resourceType) || ResourceType.Data.equals(resourceType) || ResourceType.DataTransfer.equals(resourceType) || ResourceType.ProvenanceData.equals(resourceType)) {
-            final ResourceType primaryResourceType = resourceType;
-            resourceType = null;
+        switch (resourceType) {
+            case Policy:
+            case Data:
+            case DataTransfer:
+            case ProvenanceData:
+            case Operation:
 
-            // get the resource type
-            resource = StringUtils.substringAfter(resource, primaryResourceType.getValue());
+                // get the resource type
+                final String baseResource = StringUtils.substringAfter(resource, resourceType.getValue());
+                final ResourceType baseResourceType = ResourceType.fromRawValue(baseResource);
 
-            for (ResourceType type : ResourceType.values()) {
-                if (resource.equals(type.getValue()) || resource.startsWith(type.getValue() + "/")) {
-                    resourceType = type;
-                }
-            }
-
-            if (resourceType == null) {
-                throw new ResourceNotFoundException("Unrecognized base resource: " + resource);
-            }
-
-            // must either be a policy, event, or data transfer
-            if (ResourceType.Policy.equals(primaryResourceType)) {
-                return new AccessPolicyAuthorizable(getAccessPolicy(resourceType, resource));
-            } else if (ResourceType.Data.equals(primaryResourceType)) {
-                return new DataAuthorizable(getAccessPolicy(resourceType, resource));
-            } else if (ResourceType.ProvenanceData.equals(primaryResourceType)) {
-                return new ProvenanceDataAuthorizable(getAccessPolicy(resourceType, resource));
-            } else {
-                return new DataTransferAuthorizable(getAccessPolicy(resourceType, resource));
-            }
-        } else if (ResourceType.RestrictedComponents.equals(resourceType)) {
-            final String slashRequiredPermission = StringUtils.substringAfter(resource, resourceType.getValue());
-
-            if (slashRequiredPermission.startsWith("/")) {
-                final RequiredPermission requiredPermission = RequiredPermission.valueOfPermissionIdentifier(slashRequiredPermission.substring(1));
-
-                if (requiredPermission == null) {
-                    throw new ResourceNotFoundException("Unrecognized resource: " + resource);
+                if (baseResourceType == null) {
+                    throw new ResourceNotFoundException("Unrecognized base resource: " + resource);
                 }
 
-                return getRestrictedComponents(requiredPermission);
-            } else {
-                return getRestrictedComponents();
-            }
-        } else {
-            return getAccessPolicy(resourceType, resource);
+                switch (resourceType) {
+                    case Policy:
+                        return new AccessPolicyAuthorizable(getAccessPolicy(baseResourceType, resource));
+                    case Data:
+                        return new DataAuthorizable(getAccessPolicy(baseResourceType, resource));
+                    case DataTransfer:
+                        return new DataTransferAuthorizable(getAccessPolicy(baseResourceType, resource));
+                    case ProvenanceData:
+                        return new ProvenanceDataAuthorizable(getAccessPolicy(baseResourceType, resource));
+                    case Operation:
+                        return new OperationAuthorizable(getAccessPolicy(baseResourceType, resource));
+                }
+
+            case RestrictedComponents:
+                final String slashRequiredPermission = StringUtils.substringAfter(resource, resourceType.getValue());
+
+                if (slashRequiredPermission.startsWith("/")) {
+                    final RequiredPermission requiredPermission = RequiredPermission.valueOfPermissionIdentifier(slashRequiredPermission.substring(1));
+
+                    if (requiredPermission == null) {
+                        throw new ResourceNotFoundException("Unrecognized resource: " + resource);
+                    }
+
+                    return getRestrictedComponents(requiredPermission);
+                } else {
+                    return getRestrictedComponents();
+                }
+
+            default:
+                return getAccessPolicy(resourceType, resource);
         }
     }
 
@@ -670,7 +667,8 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
      */
     private void createTemporaryProcessorsAndControllerServices(final FlowSnippetDTO snippet,
                                                                 final Set<ComponentAuthorizable> processors,
-                                                                final Set<ComponentAuthorizable> controllerServices) {
+                                                                final Set<ComponentAuthorizable> controllerServices,
+                                                                final ExtensionManager extensionManager) {
 
         if (snippet == null) {
             return;
@@ -679,7 +677,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
         if (snippet.getProcessors() != null) {
             snippet.getProcessors().forEach(processor -> {
                 try {
-                    final BundleCoordinate bundle = BundleUtils.getCompatibleBundle(processor.getType(), processor.getBundle());
+                    final BundleCoordinate bundle = BundleUtils.getCompatibleBundle(extensionManager, processor.getType(), processor.getBundle());
                     processors.add(getConfigurableComponent(processor.getType(), new BundleDTO(bundle.getGroup(), bundle.getId(), bundle.getVersion())));
                 } catch (final IllegalStateException e) {
                     // no compatible bundles... no additional auth checks necessary... if created, will be ghosted
@@ -690,7 +688,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
         if (snippet.getControllerServices() != null) {
             snippet.getControllerServices().forEach(controllerService -> {
                 try {
-                    final BundleCoordinate bundle = BundleUtils.getCompatibleBundle(controllerService.getType(), controllerService.getBundle());
+                    final BundleCoordinate bundle = BundleUtils.getCompatibleBundle(extensionManager, controllerService.getType(), controllerService.getBundle());
                     controllerServices.add(getConfigurableComponent(controllerService.getType(), new BundleDTO(bundle.getGroup(), bundle.getId(), bundle.getVersion())));
                 } catch (final IllegalStateException e) {
                     // no compatible bundles... no additional auth checks necessary... if created, will be ghosted
@@ -699,7 +697,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
         }
 
         if (snippet.getProcessGroups() != null) {
-            snippet.getProcessGroups().stream().forEach(group -> createTemporaryProcessorsAndControllerServices(group.getContents(), processors, controllerServices));
+            snippet.getProcessGroups().stream().forEach(group -> createTemporaryProcessorsAndControllerServices(group.getContents(), processors, controllerServices, extensionManager));
         }
     }
 
@@ -715,7 +713,8 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
         final Set<ComponentAuthorizable> controllerServices = new HashSet<>();
 
         // find all processors and controller services
-        createTemporaryProcessorsAndControllerServices(snippet, processors, controllerServices);
+        final ExtensionManager extensionManager = controllerFacade.getExtensionManager();
+        createTemporaryProcessorsAndControllerServices(snippet, processors, controllerServices, extensionManager);
 
         return new TemplateContentsAuthorizable() {
             @Override
@@ -761,9 +760,11 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
      */
     private static class ConfigurableComponentAuthorizable implements ComponentAuthorizable {
         private final ConfigurableComponent configurableComponent;
+        private final ExtensionManager extensionManager;
 
-        public ConfigurableComponentAuthorizable(final ConfigurableComponent configurableComponent) {
+        public ConfigurableComponentAuthorizable(final ConfigurableComponent configurableComponent, final ExtensionManager extensionManager) {
             this.configurableComponent = configurableComponent;
+            this.extensionManager = extensionManager;
         }
 
         @Override
@@ -798,7 +799,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
 
         @Override
         public void cleanUpResources() {
-            ExtensionManager.removeInstanceClassLoader(configurableComponent.getIdentifier());
+            extensionManager.removeInstanceClassLoader(configurableComponent.getIdentifier());
         }
     }
 
@@ -807,9 +808,11 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
      */
     private static class ProcessorComponentAuthorizable implements ComponentAuthorizable {
         private final ProcessorNode processorNode;
+        private final ExtensionManager extensionManager;
 
-        public ProcessorComponentAuthorizable(ProcessorNode processorNode) {
+        public ProcessorComponentAuthorizable(final ProcessorNode processorNode, final ExtensionManager extensionManager) {
             this.processorNode = processorNode;
+            this.extensionManager = extensionManager;
         }
 
         @Override
@@ -844,7 +847,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
 
         @Override
         public void cleanUpResources() {
-            ExtensionManager.removeInstanceClassLoader(processorNode.getIdentifier());
+            extensionManager.removeInstanceClassLoader(processorNode.getIdentifier());
         }
     }
 
@@ -853,9 +856,11 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
      */
     private static class ControllerServiceComponentAuthorizable implements ComponentAuthorizable {
         private final ControllerServiceNode controllerServiceNode;
+        private final ExtensionManager extensionManager;
 
-        public ControllerServiceComponentAuthorizable(ControllerServiceNode controllerServiceNode) {
+        public ControllerServiceComponentAuthorizable(final ControllerServiceNode controllerServiceNode, final ExtensionManager extensionManager) {
             this.controllerServiceNode = controllerServiceNode;
+            this.extensionManager = extensionManager;
         }
 
         @Override
@@ -890,7 +895,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
 
         @Override
         public void cleanUpResources() {
-            ExtensionManager.removeInstanceClassLoader(controllerServiceNode.getIdentifier());
+            extensionManager.removeInstanceClassLoader(controllerServiceNode.getIdentifier());
         }
     }
 
@@ -899,9 +904,11 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
      */
     private static class ReportingTaskComponentAuthorizable implements ComponentAuthorizable {
         private final ReportingTaskNode reportingTaskNode;
+        private final ExtensionManager extensionManager;
 
-        public ReportingTaskComponentAuthorizable(ReportingTaskNode reportingTaskNode) {
+        public ReportingTaskComponentAuthorizable(final ReportingTaskNode reportingTaskNode, final ExtensionManager extensionManager) {
             this.reportingTaskNode = reportingTaskNode;
+            this.extensionManager = extensionManager;
         }
 
         @Override
@@ -936,15 +943,17 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
 
         @Override
         public void cleanUpResources() {
-            ExtensionManager.removeInstanceClassLoader(reportingTaskNode.getIdentifier());
+            extensionManager.removeInstanceClassLoader(reportingTaskNode.getIdentifier());
         }
     }
 
     private static class StandardProcessGroupAuthorizable implements ProcessGroupAuthorizable {
         private final ProcessGroup processGroup;
+        private final ExtensionManager extensionManager;
 
-        public StandardProcessGroupAuthorizable(ProcessGroup processGroup) {
+        public StandardProcessGroupAuthorizable(final ProcessGroup processGroup, final ExtensionManager extensionManager) {
             this.processGroup = processGroup;
+            this.extensionManager = extensionManager;
         }
 
         @Override
@@ -955,7 +964,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
         @Override
         public Set<ComponentAuthorizable> getEncapsulatedProcessors() {
             return processGroup.findAllProcessors().stream().map(
-                    processorNode -> new ProcessorComponentAuthorizable(processorNode)).collect(Collectors.toSet());
+                    processorNode -> new ProcessorComponentAuthorizable(processorNode, extensionManager)).collect(Collectors.toSet());
         }
 
         @Override
@@ -987,7 +996,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
         @Override
         public Set<ProcessGroupAuthorizable> getEncapsulatedProcessGroups() {
             return processGroup.findAllProcessGroups().stream().map(
-                    group -> new StandardProcessGroupAuthorizable(group)).collect(Collectors.toSet());
+                    group -> new StandardProcessGroupAuthorizable(group, extensionManager)).collect(Collectors.toSet());
         }
 
         @Override
@@ -1003,7 +1012,7 @@ class StandardAuthorizableLookup implements AuthorizableLookup {
         @Override
         public Set<ComponentAuthorizable> getEncapsulatedControllerServices() {
             return processGroup.findAllControllerServices().stream().map(
-                    controllerServiceNode -> new ControllerServiceComponentAuthorizable(controllerServiceNode)).collect(Collectors.toSet());
+                    controllerServiceNode -> new ControllerServiceComponentAuthorizable(controllerServiceNode, extensionManager)).collect(Collectors.toSet());
         }
     }
 
